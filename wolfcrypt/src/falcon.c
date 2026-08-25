@@ -9382,6 +9382,8 @@ int wc_falcon_export_key(falcon_key* key, byte* priv, word32 *privSz,
  * always a copy of the same bytes and so could never detect a mismatch. */
 int wc_falcon_check_key(falcon_key* key)
 {
+    int ret = 0;
+
     if (key == NULL) {
         return BAD_FUNC_ARG;
     }
@@ -9390,15 +9392,42 @@ int wc_falcon_check_key(falcon_key* key)
         return BAD_FUNC_ARG;
     }
 
+#ifdef WOLF_CRYPTO_CB
+    #ifndef WOLF_CRYPTO_CB_FIND
+    if (key->devId != INVALID_DEVID)
+    #endif
+    {
+        word32 pubSz = (key->level == 1) ? FALCON_LEVEL1_PUB_KEY_SIZE
+                                         : FALCON_LEVEL5_PUB_KEY_SIZE;
+
+        ret = wc_CryptoCb_PqcSignatureCheckPrivKey(key,
+                WC_PQC_SIG_TYPE_FALCON, key->p, pubSz);
+        if (ret != WC_NO_ERR_TRACE(CRYPTOCB_UNAVAILABLE))
+            return ret;
+        /* fall-through when unavailable */
+        ret = 0;
+    }
+#endif /* WOLF_CRYPTO_CB */
+
+    /* Both halves have to be present locally to check one against the other.
+     * Done after dispatch: a key whose private half lives in a device carries
+     * no local key material. */
     if (!key->pubKeySet || !key->prvKeySet) {
         return PUBLIC_KEY_E;
     }
 
-#ifdef WC_FALCON_HAVE_NATIVE_SIGN
-    return falcon_native_check_key(key);
+#ifdef WOLF_CRYPTO_CB_ONLY_FALCON
+    /* No software fallback: only a crypto callback can service the request.
+     * Reporting success here would pass a key that nothing validated. */
+    ret = NO_VALID_DEVID;
+#elif defined(WOLFSSL_FALCON_VERIFY_ONLY)
+    /* The native checker is part of the signing core, which is absent. */
+    ret = NOT_COMPILED_IN;
 #else
-    return 0;
+    ret = falcon_native_check_key(key);
 #endif
+
+    return ret;
 }
 
 /* Returns the size of a falcon private key.
