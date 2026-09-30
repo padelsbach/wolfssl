@@ -180,6 +180,7 @@ void wolfSSL_RSA_free(WOLFSSL_RSA* rsa)
 
         /* Dispose of allocated reference counting data. */
         wolfSSL_RefFree(&rsa->ref);
+        wc_FreeMutex(&rsa->opMutex);
 
     #ifdef HAVE_EX_DATA_CLEANUP_HOOKS
         wolfSSL_CRYPTO_cleanup_ex_data(&rsa->ex_data);
@@ -242,6 +243,7 @@ WOLFSSL_RSA* wolfSSL_RSA_new_ex(void* heap, int devId)
     RsaKey* key = NULL;
     int err = 0;
     int rsaKeyInited = 0;
+    int opMutexInited = 0;
 
     WOLFSSL_ENTER("wolfSSL_RSA_new");
 
@@ -270,6 +272,15 @@ WOLFSSL_RSA* wolfSSL_RSA_new_ex(void* heap, int devId)
         rsa->meth = wolfSSL_RSA_get_default_method();
     #endif
 
+        if (wc_InitMutex(&rsa->opMutex) != 0) {
+            WOLFSSL_ERROR_MSG("wolfSSL_RSA_new mutex init failure");
+            err = 1;
+        }
+        else {
+            opMutexInited = 1;
+        }
+    }
+    if (!err) {
         /* Initialize reference counting. */
         wolfSSL_RefInit(&rsa->ref, &err);
 #ifdef WOLFSSL_REFCNT_ERROR_RETURN
@@ -327,6 +338,9 @@ WOLFSSL_RSA* wolfSSL_RSA_new_ex(void* heap, int devId)
         /* No failure after RNG allocation - no need to free RNG. */
         if (rsaKeyInited) {
             wc_FreeRsaKey(key);
+        }
+        if (opMutexInited) {
+            wc_FreeMutex(&rsa->opMutex);
         }
         XFREE(key, heap, DYNAMIC_TYPE_RSA);
         XFREE(rsa, heap, DYNAMIC_TYPE_RSA);
@@ -3188,6 +3202,9 @@ int wolfSSL_RSA_sign_mgf(int hashAlg, const unsigned char* hash,
         ret = 0;
     }
 
+    if ((ret == 1) && (wc_LockMutex(&rsa->opMutex) != 0)) {
+        ret = 0;
+    }
     if (ret == 1) {
         switch (padding) {
     #if defined(WC_RSA_NO_PADDING) || defined(WC_RSA_DIRECT)
@@ -3247,6 +3264,7 @@ int wolfSSL_RSA_sign_mgf(int hashAlg, const unsigned char* hash,
             ret = 0;
             break;
         }
+        wc_UnLockMutex(&rsa->opMutex);
     }
 
     if (ret == 1) {
@@ -3360,8 +3378,11 @@ int wolfSSL_RSA_verify_mgf(int hashAlg, const unsigned char* hash,
         saltLen = rsa_pss_calc_salt(saltLen, wc_HashGetDigestSize(hType),
             wolfSSL_RSA_size(rsa));
 
-        verLen = wc_RsaPSS_Verify_ex((byte*)sig, sigLen, sigDec, sigLen,
-            hType, wc_hash2mgf(mgf1), saltLen, key);
+        if (wc_LockMutex(&rsa->opMutex) == 0) {
+            verLen = wc_RsaPSS_Verify_ex((byte*)sig, sigLen, sigDec, sigLen,
+                hType, wc_hash2mgf(mgf1), saltLen, key);
+            wc_UnLockMutex(&rsa->opMutex);
+        }
         if (verLen > 0) {
             /* Check PSS padding is valid. */
             if (wc_RsaPSS_CheckPadding_ex(hash, hLen, sigDec, (word32)verLen,
@@ -3406,6 +3427,9 @@ int wolfSSL_RSA_verify_mgf(int hashAlg, const unsigned char* hash,
             ret = 0;
         }
     }
+    if ((ret == 1) && (wc_LockMutex(&rsa->opMutex) != 0)) {
+        ret = 0;
+    }
     if (ret == 1) {
         /* Decrypt signature */
     #if (!defined(HAVE_FIPS) || FIPS_VERSION_GE(5, 1)) && \
@@ -3423,6 +3447,7 @@ int wolfSSL_RSA_verify_mgf(int hashAlg, const unsigned char* hash,
             ret = 0;
         }
     #endif
+        wc_UnLockMutex(&rsa->opMutex);
     }
     if (ret == 1) {
         /* Compare decrypted signature to encoded signature. */
@@ -3539,6 +3564,9 @@ int wolfSSL_RSA_public_encrypt(int len, const unsigned char* from,
     }
 
     if (ret == 0) {
+        ret = wc_LockMutex(&rsa->opMutex);
+    }
+    if (ret == 0) {
         /* Use wolfCrypt to public-encrypt with RSA key. */
     #if !defined(HAVE_FIPS)
         ret = wc_RsaPublicEncrypt_ex(from, (word32)len, to, (word32)outLen,
@@ -3547,6 +3575,7 @@ int wolfSSL_RSA_public_encrypt(int len, const unsigned char* from,
         ret = wc_RsaPublicEncrypt(from, (word32)len, to, (word32)outLen,
             (RsaKey*)rsa->internal, rng);
     #endif
+        wc_UnLockMutex(&rsa->opMutex);
     }
 
     /* Finalize RNG if initialized in WOLFSSL_RSA_GetRNG(). */
@@ -3639,6 +3668,9 @@ int wolfSSL_RSA_private_decrypt(int len, const unsigned char* from,
     }
 
     if (ret == 0) {
+        ret = wc_LockMutex(&rsa->opMutex);
+    }
+    if (ret == 0) {
         /* Use wolfCrypt to private-decrypt with RSA key.
          * Size of 'to' buffer must be size of RSA key */
     #if !defined(HAVE_FIPS)
@@ -3648,6 +3680,7 @@ int wolfSSL_RSA_private_decrypt(int len, const unsigned char* from,
         ret = wc_RsaPrivateDecrypt(from, (word32)len, to, (word32)outLen,
             (RsaKey*)rsa->internal);
     #endif
+        wc_UnLockMutex(&rsa->opMutex);
     }
 
     /* wolfCrypt error means return -1. */
@@ -3724,6 +3757,9 @@ int wolfSSL_RSA_public_decrypt(int len, const unsigned char* from,
     }
 
     if (ret == 0) {
+        ret = wc_LockMutex(&rsa->opMutex);
+    }
+    if (ret == 0) {
         /* Use wolfCrypt to public-decrypt with RSA key. */
     #if !defined(HAVE_SELFTEST) && (!defined(HAVE_FIPS) || FIPS_VERSION_GT(2,0))
         /* Size of 'to' buffer must be size of RSA key. */
@@ -3734,6 +3770,7 @@ int wolfSSL_RSA_public_decrypt(int len, const unsigned char* from,
         ret = wc_RsaSSL_Verify(from, (word32)len, to, (word32)outLen,
             (RsaKey*)rsa->internal);
     #endif
+        wc_UnLockMutex(&rsa->opMutex);
     }
 
     /* wolfCrypt error means return -1. */
@@ -3806,6 +3843,9 @@ int wolfSSL_RSA_private_encrypt(int len, const unsigned char* from,
     }
 
     if (ret == 0) {
+        ret = wc_LockMutex(&rsa->opMutex);
+    }
+    if (ret == 0) {
         /* Use wolfCrypt to private-encrypt with RSA key.
          * Size of output buffer must be size of RSA key. */
         if (padding == WC_RSA_PKCS1_PADDING) {
@@ -3821,6 +3861,7 @@ int wolfSSL_RSA_private_encrypt(int len, const unsigned char* from,
                 ret = (int)outLen;
         }
     #endif
+        wc_UnLockMutex(&rsa->opMutex);
     }
 
     /* Finalize RNG if initialized in WOLFSSL_RSA_GetRNG(). */

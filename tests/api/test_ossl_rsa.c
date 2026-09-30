@@ -1712,3 +1712,106 @@ int test_wolfSSL_PEM_write_mem_RSAPrivateKey(void)
     return EXPECT_RESULT();
 }
 
+#if defined(OPENSSL_EXTRA) && !defined(NO_RSA) && !defined(SINGLE_THREADED) && \
+    !defined(NO_SHA256) && !defined(WOLFSSL_RSA_PUBLIC_ONLY) && \
+    !defined(WOLFSSL_RSA_VERIFY_ONLY)
+#define TEST_RSA_CONCURRENT_USE
+
+#define RSA_CONC_THREADS 8
+#define RSA_CONC_ITERS   20
+
+typedef int (*rsa_conc_crypt_fn)(int len, const unsigned char* from,
+    unsigned char* to, WOLFSSL_RSA* rsa, int padding);
+
+static WOLFSSL_RSA* rsaConcKey;
+static byte         rsaConcMsg[WC_SHA256_DIGEST_SIZE];
+
+static int test_rsa_conc_sign(int padding)
+{
+    byte sig[RSA_MAX_SIZE / 8];
+    unsigned int sigLen = (unsigned int)sizeof(sig);
+
+    return (wolfSSL_RSA_sign_generic_padding(WC_NID_sha256, rsaConcMsg,
+                (unsigned int)sizeof(rsaConcMsg), sig, &sigLen, rsaConcKey, 1,
+                padding) == 1) &&
+           (wolfSSL_RSA_verify_ex(WC_NID_sha256, rsaConcMsg,
+                (unsigned int)sizeof(rsaConcMsg), sig, sigLen, rsaConcKey,
+                padding) == 1);
+}
+
+static int test_rsa_conc_crypt(rsa_conc_crypt_fn encFn,
+    rsa_conc_crypt_fn decFn)
+{
+    byte enc[RSA_MAX_SIZE / 8];
+    byte dec[RSA_MAX_SIZE / 8];
+    int len;
+
+    len = encFn((int)sizeof(rsaConcMsg), rsaConcMsg, enc, rsaConcKey,
+        WC_RSA_PKCS1_PADDING);
+    if (len > 0) {
+        len = decFn(len, enc, dec, rsaConcKey, WC_RSA_PKCS1_PADDING);
+    }
+    return (len == (int)sizeof(rsaConcMsg)) &&
+           (XMEMCMP(dec, rsaConcMsg, sizeof(rsaConcMsg)) == 0);
+}
+
+static THREAD_RETURN WOLFSSL_THREAD test_rsa_conc_cb(void* arg)
+{
+    int* fails = (int*)arg;
+    int i;
+
+    for (i = 0; i < RSA_CONC_ITERS; i++) {
+        *fails += !test_rsa_conc_sign(WC_RSA_PKCS1_PADDING);
+    #if defined(WC_RSA_PSS) && !defined(HAVE_SELFTEST) && \
+        (!defined(HAVE_FIPS) || FIPS_VERSION_GE(5,1))
+        *fails += !test_rsa_conc_sign(WC_RSA_PKCS1_PSS_PADDING);
+    #endif
+        *fails += !test_rsa_conc_crypt(wolfSSL_RSA_public_encrypt,
+            wolfSSL_RSA_private_decrypt);
+        *fails += !test_rsa_conc_crypt(wolfSSL_RSA_private_encrypt,
+            wolfSSL_RSA_public_decrypt);
+    }
+    WOLFSSL_RETURN_FROM_THREAD(0);
+}
+#endif
+
+/* Share one RSA key across threads running each locked operation. */
+int test_wolfSSL_RSA_concurrent_use(void)
+{
+    EXPECT_DECLS;
+#ifdef TEST_RSA_CONCURRENT_USE
+    THREAD_TYPE threads[RSA_CONC_THREADS];
+    int fails[RSA_CONC_THREADS];
+#ifdef USE_CERT_BUFFERS_1024
+    const unsigned char* der = client_key_der_1024;
+    long derSz = sizeof_client_key_der_1024;
+#else
+    const unsigned char* der = client_key_der_2048;
+    long derSz = sizeof_client_key_der_2048;
+#endif
+    int started;
+    int i;
+
+    XMEMSET(threads, 0, sizeof(threads));
+    XMEMSET(fails, 0, sizeof(fails));
+    XMEMSET(rsaConcMsg, 0x09, sizeof(rsaConcMsg));
+
+    ExpectNotNull(rsaConcKey = wolfSSL_d2i_RSAPrivateKey(NULL, &der, derSz));
+
+    for (started = 0; started < RSA_CONC_THREADS; started++) {
+        if (!EXPECT_SUCCESS() || (wolfSSL_NewThread(&threads[started],
+                test_rsa_conc_cb, &fails[started]) != 0)) {
+            break;
+        }
+    }
+    ExpectIntEQ(started, RSA_CONC_THREADS);
+    for (i = 0; i < started; i++) {
+        ExpectIntEQ(wolfSSL_JoinThread(threads[i]), 0);
+        ExpectIntEQ(fails[i], 0);
+    }
+
+    wolfSSL_RSA_free(rsaConcKey);
+    rsaConcKey = NULL;
+#endif
+    return EXPECT_RESULT();
+}

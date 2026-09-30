@@ -47,6 +47,7 @@ int test_wolfSSL_PEM_read_RSAPublicKey(void);
 int test_wolfSSL_PEM_write_RSA_PUBKEY(void);
 int test_wolfSSL_PEM_write_RSAPrivateKey(void);
 int test_wolfSSL_PEM_write_mem_RSAPrivateKey(void);
+int test_wolfSSL_RSA_concurrent_use(void);
 
 #define TEST_OSSL_RSA_DECLS                                                 \
     TEST_DECL_GROUP("ossl_rsa", test_wolfSSL_RSA),                          \
@@ -71,7 +72,8 @@ int test_wolfSSL_PEM_write_mem_RSAPrivateKey(void);
     TEST_DECL_GROUP("ossl_rsa", test_wolfSSL_PEM_read_RSAPublicKey),        \
     TEST_DECL_GROUP("ossl_rsa", test_wolfSSL_PEM_write_RSA_PUBKEY),         \
     TEST_DECL_GROUP("ossl_rsa", test_wolfSSL_PEM_write_RSAPrivateKey),      \
-    TEST_DECL_GROUP("ossl_rsa", test_wolfSSL_PEM_write_mem_RSAPrivateKey)
+    TEST_DECL_GROUP("ossl_rsa", test_wolfSSL_PEM_write_mem_RSAPrivateKey),  \
+    TEST_DECL_GROUP("ossl_rsa", test_wolfSSL_RSA_concurrent_use)
 
 #endif /* WOLFCRYPT_TEST_OSSL_RSA_H */
 
