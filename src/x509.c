@@ -12943,6 +12943,7 @@ cleanup:
     {
         int ret;
         void* key = NULL;
+        wolfSSL_Mutex* rsaLock = NULL;
         int type = -1;
         int sigType;
         WC_RNG rng;
@@ -12965,6 +12966,7 @@ cleanup:
         if (pkey->type == WC_EVP_PKEY_RSA) {
             type = RSA_TYPE;
             key = pkey->rsa->internal;
+            rsaLock = &pkey->rsa->opMutex;
         }
     #endif
     #ifdef HAVE_ECC
@@ -13072,8 +13074,16 @@ cleanup:
         #endif
             return ret;
         }
-        ret = wc_SignCert_ex(certBodySz, sigType, der, (word32)derSz, type, key,
-            &rng);
+        if ((rsaLock != NULL) && (wc_LockMutex(rsaLock) != 0)) {
+            ret = BAD_MUTEX_E;
+        }
+        else {
+            ret = wc_SignCert_ex(certBodySz, sigType, der, (word32)derSz,
+                type, key, &rng);
+            if (rsaLock != NULL) {
+                wc_UnLockMutex(rsaLock);
+            }
+        }
         wc_FreeRng(&rng);
     #ifdef WOLFSSL_MLDSA_X509_SIGN
         if (mldsa != NULL) {

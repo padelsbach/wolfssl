@@ -2774,6 +2774,7 @@ int wolfSSL_X509_CRL_sign(WOLFSSL_X509_CRL* crl, WOLFSSL_EVP_PKEY* pkey,
     byte* buf = NULL;
     int bufSz = 0;
     RsaKey* rsaKey = NULL;
+    wolfSSL_Mutex* rsaLock = NULL;
     ecc_key* eccKey = NULL;
     WC_RNG rng;
     int rngInit = 0;
@@ -2816,6 +2817,7 @@ int wolfSSL_X509_CRL_sign(WOLFSSL_X509_CRL* crl, WOLFSSL_EVP_PKEY* pkey,
                 return BAD_FUNC_ARG;
             }
             rsaKey = (RsaKey*)pkey->rsa->internal;
+            rsaLock = &pkey->rsa->opMutex;
         }
         else
 #endif
@@ -2984,9 +2986,16 @@ int wolfSSL_X509_CRL_sign(WOLFSSL_X509_CRL* crl, WOLFSSL_EVP_PKEY* pkey,
     /* Sign and complete CRL. Note that the output buffer is the same as the
      * input buffer. The signature is added to the end of the buffer.
      */
+    if ((ret == WOLFSSL_SUCCESS) && (rsaLock != NULL) &&
+            (wc_LockMutex(rsaLock) != 0)) {
+        ret = BAD_MUTEX_E;
+    }
     if (ret == WOLFSSL_SUCCESS) {
         totalSz = wc_SignCRL_ex(buf, tbsSz, sigType, buf, bufSz,
                                 rsaKey, eccKey, &rng);
+        if (rsaLock != NULL) {
+            wc_UnLockMutex(rsaLock);
+        }
         if (totalSz < 0) {
             WOLFSSL_MSG("wc_SignCRL_ex failed");
             ret = totalSz;

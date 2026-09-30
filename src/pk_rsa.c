@@ -244,6 +244,7 @@ WOLFSSL_RSA* wolfSSL_RSA_new_ex(void* heap, int devId)
     int err = 0;
     int rsaKeyInited = 0;
     int opMutexInited = 0;
+    int refInited = 0;
 
     WOLFSSL_ENTER("wolfSSL_RSA_new");
 
@@ -283,6 +284,7 @@ WOLFSSL_RSA* wolfSSL_RSA_new_ex(void* heap, int devId)
     if (!err) {
         /* Initialize reference counting. */
         wolfSSL_RefInit(&rsa->ref, &err);
+        refInited = !err;
 #ifdef WOLFSSL_REFCNT_ERROR_RETURN
     }
     if (!err) {
@@ -339,6 +341,9 @@ WOLFSSL_RSA* wolfSSL_RSA_new_ex(void* heap, int devId)
         if (rsaKeyInited) {
             wc_FreeRsaKey(key);
         }
+        if (refInited) {
+            wolfSSL_RefFree(&rsa->ref);
+        }
         if (opMutexInited) {
             wc_FreeMutex(&rsa->opMutex);
         }
@@ -379,6 +384,18 @@ int wolfSSL_RSA_up_ref(WOLFSSL_RSA* rsa)
 #endif /* OPENSSL_EXTRA || OPENSSL_EXTRA_X509_SMALL */
 
 #ifdef OPENSSL_EXTRA
+
+/* Set wolfCrypt RSA key data from external once, under the key's lock. */
+static int wolfssl_rsa_set_internal(WOLFSSL_RSA* rsa)
+{
+    int ret = 0;
+
+    if (wc_LockMutex(&rsa->opMutex) == 0) {
+        ret = rsa->inSet ? 1 : SetRsaInternal(rsa);
+        wc_UnLockMutex(&rsa->opMutex);
+    }
+    return ret;
+}
 
 #if defined(WOLFSSL_KEY_GEN)
 
@@ -824,8 +841,8 @@ static int wolfSSL_RSA_To_Der_ex(WOLFSSL_RSA* rsa, byte** outBuf, int publicKey,
         ret = BAD_FUNC_ARG;
     }
     /* Push external RSA data into internal RSA key if not set. */
-    if ((ret == 1) && (!rsa->inSet)) {
-        ret = SetRsaInternal(rsa);
+    if (ret == 1) {
+        ret = wolfssl_rsa_set_internal(rsa);
     }
     /* wc_RsaKeyToPublicDer encode regardless of values. */
     if ((ret == 1) && publicKey && (mp_iszero(&((RsaKey*)rsa->internal)->n) ||
@@ -1334,7 +1351,7 @@ int wolfSSL_PEM_write_mem_RSAPrivateKey(WOLFSSL_RSA* rsa,
     }
 
     /* Set the RSA key data into the wolfCrypt RSA key if not done so. */
-    if ((ret == 1) && (!rsa->inSet) && (SetRsaInternal(rsa) != 1)) {
+    if ((ret == 1) && (wolfssl_rsa_set_internal(rsa) != 1)) {
         ret = 0;
     }
 
@@ -1969,7 +1986,7 @@ int wolfSSL_RSA_size(const WOLFSSL_RSA* rsa)
 
     if (rsa != NULL) {
         /* Make sure we have set the RSA values into wolfCrypt RSA key. */
-        if (rsa->inSet || (SetRsaInternal((WOLFSSL_RSA*)rsa) == 1)) {
+        if (wolfssl_rsa_set_internal((WOLFSSL_RSA*)rsa) == 1) {
             /* Get key size in bytes using wolfCrypt RSA key. */
             ret = wc_RsaEncryptSize((RsaKey*)rsa->internal);
         }
@@ -2380,6 +2397,7 @@ int wolfSSL_RSA_set_ex_data_with_cleanup(WOLFSSL_RSA *rsa, int idx, void *data,
 int wolfSSL_RSA_check_key(const WOLFSSL_RSA* rsa)
 {
     int ret = 1;
+    wolfSSL_Mutex* opMutex = NULL;
 
     WOLFSSL_ENTER("wolfSSL_RSA_check_key");
 
@@ -2390,9 +2408,19 @@ int wolfSSL_RSA_check_key(const WOLFSSL_RSA* rsa)
 
     /* Constant RSA - assume internal data has been set. */
 
-    /* Check wolfCrypt RSA key. */
-    if ((ret == 1) && (wc_CheckRsaKey((RsaKey*)rsa->internal) != 0)) {
-        ret = 0;
+    if (ret == 1) {
+        /* The check signs and verifies, so it needs the key's lock. */
+        opMutex = (wolfSSL_Mutex*)&rsa->opMutex;
+        if (wc_LockMutex(opMutex) != 0) {
+            ret = 0;
+        }
+    }
+    if (ret == 1) {
+        /* Check wolfCrypt RSA key. */
+        if (wc_CheckRsaKey((RsaKey*)rsa->internal) != 0) {
+            ret = 0;
+        }
+        wc_UnLockMutex(opMutex);
     }
 
     WOLFSSL_LEAVE("wolfSSL_RSA_check_key", ret);
@@ -3156,7 +3184,7 @@ int wolfSSL_RSA_sign_mgf(int hashAlg, const unsigned char* hash,
     }
 
     /* Set wolfCrypt RSA key data from external if not already done. */
-    if ((ret == 1) && (!rsa->inSet) && (SetRsaInternal(rsa) != 1)) {
+    if ((ret == 1) && (wolfssl_rsa_set_internal(rsa) != 1)) {
         ret = 0;
     }
 
@@ -3228,7 +3256,7 @@ int wolfSSL_RSA_sign_mgf(int hashAlg, const unsigned char* hash,
             mgf1 = wc_OidGetHash((int)nid2oid(mgf1Hash, oidHashType));
             /* handle compat layer salt special cases */
             saltLen = rsa_pss_calc_salt(saltLen, wc_HashGetDigestSize(hType),
-                wolfSSL_RSA_size(rsa));
+                wc_RsaEncryptSize(key));
 
             /* Create RSA PSS signature. */
             if ((signSz = wc_RsaPSS_Sign_ex(encodedSig, encSz, sigRet, outLen,
@@ -3542,7 +3570,7 @@ int wolfSSL_RSA_public_encrypt(int len, const unsigned char* from,
     }
 
     /* Set wolfCrypt RSA key data from external if not already done. */
-    if ((ret == 0) && (!rsa->inSet) && (SetRsaInternal(rsa) != 1)) {
+    if ((ret == 0) && (wolfssl_rsa_set_internal(rsa) != 1)) {
         ret = WOLFSSL_FATAL_ERROR;
     }
 
@@ -3654,7 +3682,7 @@ int wolfSSL_RSA_private_decrypt(int len, const unsigned char* from,
     }
 
     /* Set wolfCrypt RSA key data from external if not already done. */
-    if ((ret == 0) && (!rsa->inSet) && (SetRsaInternal(rsa) != 1)) {
+    if ((ret == 0) && (wolfssl_rsa_set_internal(rsa) != 1)) {
         ret = WOLFSSL_FATAL_ERROR;
     }
 
@@ -3743,7 +3771,7 @@ int wolfSSL_RSA_public_decrypt(int len, const unsigned char* from,
     }
 
     /* Set wolfCrypt RSA key data from external if not already done. */
-    if ((ret == 0) && (!rsa->inSet) && (SetRsaInternal(rsa) != 1)) {
+    if ((ret == 0) && (wolfssl_rsa_set_internal(rsa) != 1)) {
         ret = WOLFSSL_FATAL_ERROR;
     }
 
@@ -3805,6 +3833,7 @@ int wolfSSL_RSA_private_encrypt(int len, const unsigned char* from,
     WC_RNG  _tmpRng[1];
     WC_RNG* tmpRng = _tmpRng;
 #endif
+    word32 outLen = 0;
 
     WOLFSSL_ENTER("wolfSSL_RSA_private_encrypt");
 
@@ -3830,8 +3859,17 @@ int wolfSSL_RSA_private_encrypt(int len, const unsigned char* from,
     }
 
     /* Set wolfCrypt RSA key data from external if not already done. */
-    if ((ret == 0) && (!rsa->inSet) && (SetRsaInternal(rsa) != 1)) {
+    if ((ret == 0) && (wolfssl_rsa_set_internal(rsa) != 1)) {
         ret = WOLFSSL_FATAL_ERROR;
+    }
+
+    if (ret == 0) {
+        /* Calculate maximum length of encrypted data. */
+        outLen = (word32)wolfSSL_RSA_size(rsa);
+        if (outLen == 0) {
+            WOLFSSL_ERROR_MSG("Bad RSA size");
+            ret = WOLFSSL_FATAL_ERROR;
+        }
     }
 
     if (ret == 0) {
@@ -3849,12 +3887,11 @@ int wolfSSL_RSA_private_encrypt(int len, const unsigned char* from,
         /* Use wolfCrypt to private-encrypt with RSA key.
          * Size of output buffer must be size of RSA key. */
         if (padding == WC_RSA_PKCS1_PADDING) {
-            ret = wc_RsaSSL_Sign(from, (word32)len, to,
-                (word32)wolfSSL_RSA_size(rsa), (RsaKey*)rsa->internal, rng);
+            ret = wc_RsaSSL_Sign(from, (word32)len, to, outLen,
+                (RsaKey*)rsa->internal, rng);
         }
     #ifdef WC_RSA_NO_PADDING
         else if (padding == WC_RSA_NO_PAD) {
-            word32 outLen = (word32)wolfSSL_RSA_size(rsa);
             ret = wc_RsaFunction(from, (word32)len, to, &outLen,
                     RSA_PRIVATE_ENCRYPT, (RsaKey*)rsa->internal, rng);
             if (ret == 0)
